@@ -7,18 +7,18 @@ Compatible with Windows, OS X, Linux.
 
 ## System requirements
 
-* Python3
+* Python 3.6
 
 
 ## Instructions
 ### Installation
 ```
-pip3 install scdl
+pip install scdl
 ```
 or
 ```
 git clone https://github.com/AHSubsDesign/pyscdl.git && cd pyscdl
-python3 setup.py install
+python setup.py install
 ```
 or
 
