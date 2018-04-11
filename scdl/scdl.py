@@ -7,11 +7,11 @@ Usage:
     scdl -l <track_url> [-a | -f | -C | -t | -p][-c][-o <offset>]\
 [--hidewarnings][--debug | --error][--path <path>][--addtofile][--addtimestamp]
 [--onlymp3][--hide-progress][--min-size <size>][--max-size <size>][--remove]
-[--no-playlist-folder][--download-archive <file>][--extract-artist]
+[--no-playlist-folder][--download-archive <file>][--extract-artist][--flac]
     scdl me (-s | -a | -f | -t | -p | -m)[-c][-o <offset>]\
 [--hidewarnings][--debug | --error][--path <path>][--addtofile][--addtimestamp]
 [--onlymp3][--hide-progress][--min-size <size>][--max-size <size>][--remove]
-[--no-playlist-folder][--download-archive <file>][--extract-artist]
+[--no-playlist-folder][--download-archive <file>][--extract-artist][--flac]
     scdl -h | --help
     scdl --version
 
@@ -48,6 +48,7 @@ Options:
                                 even if track has a Downloadable file
     --path [path]               Use a custom path for downloaded files
     --remove                    Remove any files not downloaded from execution
+    --flac                      Convert original files to .flac
 """
 
 import logging
@@ -62,6 +63,7 @@ import requests
 import re
 import tempfile
 import codecs
+import shlex
 
 import configparser
 import mutagen
@@ -95,7 +97,7 @@ url = {
     'all': ('https://api-v2.soundcloud.com/profile/soundcloud:users:{0}?'
             'limit=200'),
     'playlists': ('https://api.soundcloud.com/users/{0}/playlists?'
-                  'limit=200'),
+                  'limit=5'),
     'resolve': ('https://api.soundcloud.com/resolve?url={0}'),
     'trackinfo': ('https://api.soundcloud.com/tracks/{0}'),
     'user': ('https://api.soundcloud.com/users/{0}'),
@@ -524,7 +526,17 @@ def download_track(track, playlist_name=None, playlist_file=None):
         sys.exit()
 
     shutil.move(temp.name, os.path.join(os.getcwd(), filename))
-    if filename.endswith('.mp3') or filename.endswith('.m4a'):
+    if arguments['--flac'] and can_convert(filename):
+        logger.info('Converting to .flac...')
+        newfilename = filename[:-4] + ".flac"
+        new = shlex.quote(newfilename)
+        old = shlex.quote(filename)
+        logger.debug("ffmpeg -i {0} {1} -loglevel fatal".format(old, new))
+        os.system("ffmpeg -i {0} {1} -loglevel fatal".format(old, new))
+        os.remove(filename)
+        filename = newfilename
+
+    if filename.endswith('.mp3') or filename.endswith('.flac'):
         try:
             set_metadata(track, filename, playlist_name)
         except Exception as e:
@@ -543,17 +555,27 @@ def download_track(track, playlist_name=None, playlist_file=None):
     record_download_archive(track)
 
 
-def already_downloaded(track, title, filename=None):
+def can_convert(filename):
+    ext = os.path.splitext(filename)[1]
+    return 'wav' in ext or 'aif' in ext
+
+def already_downloaded(track, title, filename):
     """
     Returns True if the file has already been downloaded
     """
     global arguments
     already_downloaded = False
 
-    if filename and os.path.isfile(filename):
+    if os.path.isfile(filename):
+        already_downloaded = True
+    if arguments['--flac'] and can_convert(filename) \
+                           and os.path.isfile(filename[:-4] + ".flac"):
         already_downloaded = True
     if arguments['--download-archive'] and in_download_archive(track):
         already_downloaded = True
+
+    if arguments['--flac'] and can_convert(filename) and os.path.isfile(filename):
+        already_downloaded = False
 
     if already_downloaded:
         if arguments['-c'] or arguments['--remove']:
@@ -628,8 +650,7 @@ def set_metadata(track, filename, album=None):
         track_date = datetime.strptime(track_created, "%Y/%m/%d %H:%M:%S %z")
         debug_extract_dates = '{0} {1}'.format(track_created, track_date)
         logger.debug('Extracting date: {0}'.format(debug_extract_dates))
-        track_year = track_date.strftime("%Y")
-        track_day_month = track_date.strftime("%d%m")
+        track['date'] = track_date.strftime("%Y-%m-%d %H::%M::%S")
 
         track['artist'] = user['username']
         if arguments['--extract-artist']:
@@ -640,32 +661,37 @@ def set_metadata(track, filename, album=None):
                     track['title'] = artist_title[1].strip()
                     break
 
-        audio = mutagen.File(filename)
-        audio['TIT2'] = mutagen.id3.TIT2(encoding=3, text=track['title'])
-        audio['TPE1'] = mutagen.id3.TPE1(encoding=3, text=track['artist'])
+        audio = mutagen.File(filename, easy=True)
+        audio['title'] = track['title']
+        audio['artist'] = track['artist']
+        if album: audio['album'] = album
+        if track['genre']: audio['genre'] = track['genre']
+        if track['permalink_url']: audio['website'] = track['permalink_url']
+        if track['date']: audio['date'] = track['date']
+        audio.save()
 
-        if track['genre']:
-            audio['TCON'] = mutagen.id3.TCON(encoding=3, text=track['genre'])
-        if track_year:
-            audio['TYER'] = mutagen.id3.TYER(encoding=3, text=track_year)
-        if track_day_month:
-            audio['TDAT'] = mutagen.id3.TDAT(encoding=3, text=track_day_month)
-        if track['permalink_url']:
-            audio['WOAS'] = mutagen.id3.WOAS(url=track['permalink_url'])
-        if album:
-            audio['TALB'] = mutagen.id3.TALB(encoding=3, text=album)
+        a = mutagen.File(filename)
         if track['description']:
-            audio['COMM'] = mutagen.id3.COMM(
-                encoding=3, lang=u'ENG', text=track['description']
-            )
-        if artwork_url:
-            audio['APIC'] = mutagen.id3.APIC(
-                encoding=3, mime='image/jpeg', type=3, desc='Cover',
-                data=out_file.read()
+            if a.__class__ == mutagen.flac.FLAC:
+                a['description'] = track['description']
+            elif a.__class__ == mutagen.mp3.MP3:
+                a['COMM'] = mutagen.id3.COMM(
+                    encoding=3, lang=u'ENG', text=track['description']
                 )
-        else:
-            logger.error('Artwork can not be set.')
-    audio.save(v2_version=3)
+        if artwork_url:
+            if a.__class__ == mutagen.flac.FLAC:
+                p = mutagen.flac.Picture()
+                p.data = out_file.read()
+                p.width = 500
+                p.height = 500
+                p.type = mutagen.id3.PictureType.COVER_FRONT
+                a.add_picture(p)
+            elif a.__class__ == mutagen.mp3.MP3:
+                a['APIC'] = mutagen.id3.APIC(
+                    encoding=3, mime='image/jpeg', type=3,
+                    desc='Cover', data=out_file.read()
+                )
+        a.save()
 
 
 def signal_handler(signal, frame):
