@@ -13,7 +13,7 @@ Compatible with Windows, OS X, Linux.
 ## Instructions
 ### Installation
 ```
-pip install scdl
+pip install pyscdl
 ```
 or
 ```
